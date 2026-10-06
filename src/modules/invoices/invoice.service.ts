@@ -6,6 +6,7 @@ import {
   SalesInvoice,
 } from '../../types/index.js';
 import { LedgerService, AccountingError } from '../accounting/ledger.service.js';
+import { ShopSettingsService } from '../settings/shop-settings.service.js';
 
 export interface CreateInvoiceInput {
   customer_id: number;
@@ -16,7 +17,31 @@ export interface CreateInvoiceInput {
     amount: number;
     tax_rate?: number | null;
     tax_amount?: number;
+    hsn_code?: string | null;
   }[];
+}
+
+/**
+ * Splits an already-computed line tax amount into CGST/SGST (intra-state) or IGST
+ * (inter-state), per docs/DATA_MODEL.md §3. Only runs when the shop has GST settings
+ * configured (state_code set) — otherwise returns all zeros, which is exactly the old
+ * behavior: the line keeps a plain `tax_amount` and deliverInvoice falls back to posting
+ * it to the single generic Tax Payable account, unchanged from before this feature existed.
+ */
+function splitGst(
+  taxAmount: number,
+  customerStateCode: string | null | undefined,
+  shopStateCode: string | null | undefined
+): { cgst_paise: number; sgst_paise: number; igst_paise: number } {
+  if (!taxAmount || taxAmount <= 0 || !shopStateCode) {
+    return { cgst_paise: 0, sgst_paise: 0, igst_paise: 0 };
+  }
+  const isIntraState = !!customerStateCode && customerStateCode === shopStateCode;
+  if (isIntraState) {
+    const cgst = Math.floor(taxAmount / 2);
+    return { cgst_paise: cgst, sgst_paise: taxAmount - cgst, igst_paise: 0 };
+  }
+  return { cgst_paise: 0, sgst_paise: 0, igst_paise: taxAmount };
 }
 
 export class InvoiceError extends Error {
@@ -100,19 +125,33 @@ export class InvoiceService {
 
       const invoiceId = Number(result.lastInsertRowid);
 
+      // Resolve GST context once per invoice (docs/DATA_MODEL.md §3): if the shop has no
+      // state_code configured, splitGst() always returns zeros and nothing below changes
+      // from pre-GST-Pack behavior.
+      const shopSettings = ShopSettingsService.get(db);
+      const customerRow = db
+        .prepare('SELECT state_code FROM contacts WHERE id = ?')
+        .get(input.customer_id) as { state_code: string | null } | undefined;
+
       // Insert line items if provided
       if (input.entries && input.entries.length > 0) {
         const insertItemStmt = db.prepare(`
-          INSERT INTO items_entries (reference_type, reference_id, amount, tax_rate, tax_amount)
-          VALUES ('SaleInvoice', ?, ?, ?, ?)
+          INSERT INTO items_entries (reference_type, reference_id, amount, tax_rate, tax_amount, hsn_code, cgst_paise, sgst_paise, igst_paise)
+          VALUES ('SaleInvoice', ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         for (const entry of input.entries) {
+          const taxAmount = entry.tax_amount ?? 0;
+          const gst = splitGst(taxAmount, customerRow?.state_code, shopSettings?.state_code);
           insertItemStmt.run(
             invoiceId,
             entry.amount,
             entry.tax_rate ?? null,
-            entry.tax_amount ?? 0
+            taxAmount,
+            entry.hsn_code ?? null,
+            gst.cgst_paise,
+            gst.sgst_paise,
+            gst.igst_paise
           );
         }
       } else {
@@ -160,19 +199,29 @@ export class InvoiceService {
 
       // Fetch line items
       const items = db
-        .prepare('SELECT amount, tax_rate, tax_amount FROM items_entries WHERE reference_type = ? AND reference_id = ?')
+        .prepare('SELECT amount, tax_rate, tax_amount, cgst_paise, sgst_paise, igst_paise FROM items_entries WHERE reference_type = ? AND reference_id = ?')
         .all('SaleInvoice', invoice.id) as {
         amount: number;
         tax_rate: number | null;
         tax_amount: number;
+        cgst_paise: number | null;
+        sgst_paise: number | null;
+        igst_paise: number | null;
       }[];
 
       let totalTax = 0;
+      let totalCgst = 0;
+      let totalSgst = 0;
+      let totalIgst = 0;
       for (const item of items) {
         totalTax += item.tax_amount || 0;
+        totalCgst += item.cgst_paise || 0;
+        totalSgst += item.sgst_paise || 0;
+        totalIgst += item.igst_paise || 0;
       }
 
       const totalRevenue = invoice.total_amount - totalTax;
+      const hasGstSplit = totalCgst + totalSgst + totalIgst > 0;
 
       // Accounts
       const arAccount = LedgerService.getAccountByCode('1100', db); // Accounts Receivable
@@ -182,7 +231,25 @@ export class InvoiceService {
         { account_id: arAccount.id, debit: invoice.total_amount, credit: 0 },
       ];
 
-      if (totalTax > 0) {
+      if (hasGstSplit) {
+        // GST Filing Pack path (docs/DATA_MODEL.md §3): post to the dedicated CGST/SGST/IGST
+        // Payable accounts instead of the generic Tax Payable, so the report's ledger tie-out
+        // has something to check itself against. totalCgst+totalSgst+totalIgst === totalTax by
+        // construction (splitGst() in createInvoice), so the journal still balances exactly.
+        if (totalCgst > 0) {
+          const cgstAccount = LedgerService.getAccountByCode('2101', db);
+          lines.push({ account_id: cgstAccount.id, debit: 0, credit: totalCgst });
+        }
+        if (totalSgst > 0) {
+          const sgstAccount = LedgerService.getAccountByCode('2102', db);
+          lines.push({ account_id: sgstAccount.id, debit: 0, credit: totalSgst });
+        }
+        if (totalIgst > 0) {
+          const igstAccount = LedgerService.getAccountByCode('2103', db);
+          lines.push({ account_id: igstAccount.id, debit: 0, credit: totalIgst });
+        }
+        lines.push({ account_id: revenueAccount.id, debit: 0, credit: totalRevenue });
+      } else if (totalTax > 0) {
         const taxAccount = LedgerService.getAccountByCode('2100', db); // Tax Payable
         lines.push({ account_id: taxAccount.id, debit: 0, credit: totalTax });
         lines.push({ account_id: revenueAccount.id, debit: 0, credit: totalRevenue });

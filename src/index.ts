@@ -1,12 +1,13 @@
 import { createApp } from './app.js';
 import { config } from './config/env.js';
 import { initDb } from './database/db.js';
-import { seedDatabase } from './database/seed.js';
+import { seedDatabase, seedGstDemoData } from './database/seed.js';
 
 function bootstrap() {
   console.log('Initializing database...');
   const db = initDb(config.dbPath);
   seedDatabase(db);
+  seedGstDemoData(db);
 
   const app = createApp();
 

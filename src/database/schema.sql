@@ -26,6 +26,18 @@ CREATE TABLE IF NOT EXISTS contacts (
   name TEXT NOT NULL
 );
 
+-- GST Filing Pack fields (docs/DATA_MODEL.md §3): contacts.gstin and contacts.state_code are
+-- added by the guarded column migration in src/database/db.ts (applyColumnMigrations), not here
+-- — SQLite's ALTER TABLE has no "ADD COLUMN IF NOT EXISTS", and this file re-runs on every
+-- server start, so a plain ALTER TABLE here would crash on the second run.
+
+-- Single-row shop settings used to decide intra-state (CGST+SGST) vs inter-state (IGST).
+CREATE TABLE IF NOT EXISTS shop_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  gstin TEXT,
+  state_code TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sales_invoices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   invoice_no TEXT NOT NULL UNIQUE,
@@ -55,6 +67,10 @@ CREATE TABLE IF NOT EXISTS items_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_entries_ref ON items_entries(reference_type, reference_id);
+
+-- GST Filing Pack fields (docs/DATA_MODEL.md §3): items_entries.hsn_code/cgst_paise/sgst_paise/
+-- igst_paise are added by the guarded column migration in src/database/db.ts, for the same
+-- "ADD COLUMN IF NOT EXISTS doesn't exist in SQLite" reason noted above for contacts.
 
 CREATE TABLE IF NOT EXISTS payment_receives (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

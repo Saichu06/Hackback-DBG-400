@@ -25,6 +25,14 @@ export interface Contact {
   id: number;
   contact_type: ContactType;
   name: string;
+  gstin?: string | null;
+  state_code?: string | null;
+}
+
+export interface ShopSettings {
+  id: 1;
+  gstin: string | null;
+  state_code: string | null;
 }
 
 export type InvoiceStatus = 'Draft' | 'Delivered' | 'Partially Paid' | 'Paid' | 'Voided';
@@ -64,6 +72,10 @@ export interface ItemEntry {
   amount: number; // in integer cents
   tax_rate: number | null; // in basis points (e.g. 1800 = 18.00%)
   tax_amount: number; // in integer cents
+  hsn_code?: string | null;
+  cgst_paise?: number;
+  sgst_paise?: number;
+  igst_paise?: number;
 }
 
 export interface PaymentReceive {

@@ -23,6 +23,34 @@ export function setDb(db: Database.Database): void {
   dbInstance = db;
 }
 
+/**
+ * Adds a column to an existing table only if it isn't already there. SQLite's ALTER TABLE has
+ * no "ADD COLUMN IF NOT EXISTS", and initDb() re-runs schema.sql on every process start, so a
+ * plain ALTER TABLE would succeed once and then crash the server on every restart after that.
+ * This is the guarded alternative used for the additive GST Filing Pack columns (see
+ * docs/DATA_MODEL.md §3): check `PRAGMA table_info`, add the column only when it's missing.
+ */
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  columnDefSql: string
+): void {
+  const existing = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!existing.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDefSql}`);
+  }
+}
+
+function applyColumnMigrations(db: Database.Database): void {
+  addColumnIfMissing(db, 'contacts', 'gstin', 'gstin TEXT');
+  addColumnIfMissing(db, 'contacts', 'state_code', 'state_code TEXT');
+  addColumnIfMissing(db, 'items_entries', 'hsn_code', 'hsn_code TEXT');
+  addColumnIfMissing(db, 'items_entries', 'cgst_paise', 'cgst_paise INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'items_entries', 'sgst_paise', 'sgst_paise INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'items_entries', 'igst_paise', 'igst_paise INTEGER NOT NULL DEFAULT 0');
+}
+
 export function initDb(dbPath: string = config.dbPath): Database.Database {
   const db = new Database(dbPath);
   // Enforce foreign keys and WAL mode
@@ -34,6 +62,7 @@ export function initDb(dbPath: string = config.dbPath): Database.Database {
   const schemaPath = path.resolve(__dirname, 'schema.sql');
   const schemaSql = fs.readFileSync(schemaPath, 'utf8');
   db.exec(schemaSql);
+  applyColumnMigrations(db);
 
   return db;
 }
@@ -44,6 +73,7 @@ export function createInMemoryDb(): Database.Database {
   const schemaPath = path.resolve(__dirname, 'schema.sql');
   const schemaSql = fs.readFileSync(schemaPath, 'utf8');
   db.exec(schemaSql);
+  applyColumnMigrations(db);
   return db;
 }
 

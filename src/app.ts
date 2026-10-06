@@ -12,6 +12,8 @@ import { BillService } from './modules/bills/bill.service.js';
 import { ManualJournalService } from './modules/manual-journals/manual-journal.service.js';
 import { ReportService } from './modules/reports/report.service.js';
 import { TestHarnessService } from './modules/test-harness/test-harness.service.js';
+import { ChatbotService } from './modules/chatbot/chatbot.service.js';
+import { GstReportService, currentMonth } from './modules/reports/gst-report.service.js';
 
 export function createApp(): express.Application {
   const app = express();
@@ -122,6 +124,32 @@ export function createApp(): express.Application {
       try {
         const contacts = ContactService.listContacts();
         res.json(contacts);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // Additive convenience endpoint (not in API.md's core surface, but does not
+  // change any documented contract): lets Admin/Staff add new customers or
+  // vendors from the UI instead of relying solely on the seed data.
+  app.post(
+    '/api/contacts',
+    authenticate,
+    requireRoles('Admin', 'Staff'),
+    (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { name, contact_type } = req.body;
+        if (!name || typeof name !== 'string' || !name.trim()) {
+          res.status(400).json({ error: 'name is required' });
+          return;
+        }
+        if (contact_type !== 'Customer' && contact_type !== 'Vendor') {
+          res.status(400).json({ error: "contact_type must be 'Customer' or 'Vendor'" });
+          return;
+        }
+        const contact = ContactService.createContact(name.trim(), contact_type);
+        res.status(201).json(contact);
       } catch (err) {
         next(err);
       }
@@ -379,6 +407,68 @@ export function createApp(): express.Application {
       try {
         const result = ReportService.getProfitLossSheet();
         res.json(result);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // -------------------------------------------------------------
+  // 10b. GST Filing Pack (Admin, Accountant) — see docs/API.md
+  // -------------------------------------------------------------
+  app.get(
+    '/api/v1/reports/gst',
+    authenticate,
+    requireRoles('Admin', 'Accountant'),
+    (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const month = typeof req.query.month === 'string' && req.query.month ? req.query.month : currentMonth();
+        const pack = GstReportService.getFilingPack(month);
+        res.json(pack);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  app.get(
+    '/api/v1/reports/gst.csv',
+    authenticate,
+    requireRoles('Admin', 'Accountant'),
+    (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const month = typeof req.query.month === 'string' && req.query.month ? req.query.month : currentMonth();
+        const pack = GstReportService.getFilingPack(month);
+        const csv = GstReportService.toCsv(pack);
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="gst-filing-pack-${pack.month}.csv"`);
+        res.send(csv);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // -------------------------------------------------------------
+  // 11. AI Assistant Chatbot (any authenticated role)
+  // -------------------------------------------------------------
+  // Additive feature, not part of API.md's documented surface: proxies to
+  // Google Gemini so the API key never reaches the browser. The system
+  // instruction is built from the caller's own role/email (see
+  // chatbot.service.ts), so answers are scoped to what that role can do.
+  app.post(
+    '/api/chatbot',
+    authenticate,
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const { message, history } = req.body;
+        const reply = await ChatbotService.sendMessage(
+          message,
+          history,
+          req.user!.role,
+          req.user!.email
+        );
+        res.json({ reply });
       } catch (err) {
         next(err);
       }
